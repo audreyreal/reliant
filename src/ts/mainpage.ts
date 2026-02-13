@@ -12,7 +12,7 @@
         <title>Reliant</title>
         <meta charset="utf-8">
     </head>
-    <body>
+    <body style="background-repeat: no-repeat; background-size: cover;">
         <div id="container">
             <div id="group-2">
                 <!-- Switchers -->
@@ -73,10 +73,15 @@
                     <input type="button" id="move-to-jp" value="Move to JP" class="ajaxbutton">
                     <span class="subheader">Chase</span>
                     <input type="button" id="chasing-button" value="Refresh" class="ajaxbutton">
+                    <span class="subheader occupation-mode-toggle">Occupation Mode</span>
+                    <span class="information occupation-mode-toggle" id="occupation-status">Disabled</span>
+                    <span class="subheader occupation-mode-toggle">Sequence</span>
+                    <span class="information occupation-mode-toggle" id="occupation-sequence">Ready</span>
                 </div>
                 <!-- Reports Container -->
                 <div id="reports-container">
                     <span class="header">Reports</span>
+                    <span id="sse-status" style="float: right; font-size: 0.9em; color: #999;">⚪ Connecting...</span>
                     <label for="set-sse-timeout">Timeout (seconds)</label>
                     <input type="text" id="sse-timeout-value">
                     <input type="button" id="set-sse-timeout" value="Set">
@@ -170,8 +175,9 @@
             regex: /@@([^@]+)@@ relocated from %%([^%]+)%% to %%([^%]+)%%/,
             format: (matches) => formatLink(matches[1], 'nation') +
                 ` moved from ${formatLink(matches[2], 'region')} to ${formatLink(matches[3], 'region')}`,
-            handler: (matches) => {
+            handler: async (matches) => {
                 // (document.querySelector('#chasing-button') as HTMLInputElement).setAttribute('data-moveregion', matches[3]);
+                await playMoveSuccessSound();
             }
         },
         ADMISSION: {
@@ -192,7 +198,27 @@
         },
         INFLUENCE: {
             regex: /@@([^@]+)@@'s influence in %%([^@]+)%% rose from "[^@]+" to "[^@]+"/,
-            format: (matches) => `${formatLink(matches[1], 'nation')} updated in ${formatLink(matches[2], 'region')}`
+            format: (matches) => `${formatLink(matches[1], 'nation')} updated in ${formatLink(matches[2], 'region')}`,
+            handler: async (matches) => {
+                // Check if this is the current WA nation updating
+                const updatedNation = matches[1];
+                const currentWA = await getStorageValue('currentwa');
+                if (currentWA && canonicalize(updatedNation) === canonicalize(currentWA)) {
+                    // Highlight the current WA nation element
+                    const currentWAElement = document.querySelector('#current-wa-nation');
+                    if (currentWAElement) {
+                        // Remove any existing highlights first
+                        currentWAElement.classList.remove('highlight-active', 'highlight-na');
+                        // Add red pulse animation
+                        currentWAElement.classList.add('highlight-update');
+                        // After animation, switch to green highlight
+                        setTimeout(() => {
+                            currentWAElement.classList.remove('highlight-update');
+                            currentWAElement.classList.add('highlight-active');
+                        }, 2000); // Match the pulse animation duration
+                    }
+                }
+            }
         },
         WA_DELEGATE: {
             regex: /@@([^@]+)@@ became WA Delegate of %%([^%]+)%%/,
@@ -203,6 +229,33 @@
 // Helper function to create links
     const formatLink = (text: string, type: 'nation' | 'region'): string => {
         return `<a href="/${type}=${text}">${text}</a>`;
+    };
+    
+    // Track timeout for N/A highlighting
+    let naHighlightTimeout: number | null = null;
+    
+    // Helper function to handle WA nation display highlighting
+    const updateWANationDisplay = (element: HTMLSpanElement, value: string): void => {
+        element.innerHTML = value;
+        
+        // Clear any existing timeout
+        if (naHighlightTimeout) {
+            clearTimeout(naHighlightTimeout);
+            naHighlightTimeout = null;
+        }
+        
+        // Remove all highlight classes first
+        element.classList.remove('highlight-update', 'highlight-na', 'highlight-active');
+        
+        // Add highlight-na class if value is N/A, but with a 5-second delay
+        if (value === 'N/A' || !value) {
+            naHighlightTimeout = setTimeout(() => {
+                // Check if the value is still N/A after the delay
+                if (element.innerHTML === 'N/A' || !element.innerHTML) {
+                    element.classList.add('highlight-na');
+                }
+            }, 5000);
+        }
     };
 
 // Helper function to append report
@@ -252,8 +305,101 @@
         }
     };
 
-    // Set up event source
+    // SSE connection management variables
     let eventSource: EventSource;
+    let sseReconnectTimeout: number | null = null;
+    let sseReconnectDelay = 1000; // Start with 1 second delay
+    let sseConnectionRetries = 0;
+    const MAX_SSE_RETRIES = 5;
+    const SSE_DEBOUNCE_DELAY = 2000; // 2 second debounce for reconnections
+    
+    // Helper function to create SSE connection with retry logic
+    function createSSEConnection(url: string): void {
+        // Close existing connection if any
+        if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
+            eventSource.close();
+        }
+        
+        eventSource = new EventSource(url);
+        eventSource.onmessage = handleEventMessage;
+        
+        eventSource.onopen = () => {
+            console.log('SSE connection opened');
+            // Reset retry counters on successful connection
+            sseConnectionRetries = 0;
+            sseReconnectDelay = 1000;
+            
+            // Update SSE status indicator
+            const sseStatusElement = document.querySelector('#sse-status') as HTMLSpanElement;
+            if (sseStatusElement) {
+                sseStatusElement.innerHTML = '🟢 Connected';
+                sseStatusElement.style.color = '#4CAF50';
+            }
+            
+            // Clear any error status
+            const currentStatus = status.innerHTML;
+            if (currentStatus.includes('SSE connection') || currentStatus.includes('Retrying')) {
+                status.innerHTML = 'Connected to live updates.';
+            }
+        };
+        
+        eventSource.onerror = (error) => {
+            console.error('SSE connection error:', error);
+            
+            // Update SSE status indicator
+            const sseStatusElement = document.querySelector('#sse-status') as HTMLSpanElement;
+            if (sseStatusElement) {
+                sseStatusElement.innerHTML = '🔴 Disconnected';
+                sseStatusElement.style.color = '#f44336';
+            }
+            
+            // Check if connection is closed (likely due to 429 or network error)
+            if (eventSource.readyState === EventSource.CLOSED) {
+                if (sseConnectionRetries < MAX_SSE_RETRIES) {
+                    sseConnectionRetries++;
+                    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
+                    const delay = Math.min(sseReconnectDelay * Math.pow(2, sseConnectionRetries - 1), 30000);
+                    
+                    console.log(`SSE connection failed. Retrying in ${delay/1000}s (attempt ${sseConnectionRetries}/${MAX_SSE_RETRIES})`);
+                    
+                    // Update status indicator with retry info
+                    if (sseStatusElement) {
+                        sseStatusElement.innerHTML = `🟡 Retry in ${delay/1000}s`;
+                        sseStatusElement.style.color = '#FFC107';
+                    }
+                    
+                    // Only show status if it's taking longer than expected
+                    if (sseConnectionRetries > 1) {
+                        status.innerHTML = `Reconnecting to updates in ${delay/1000}s...`;
+                    }
+                    
+                    setTimeout(() => {
+                        console.log(`Retrying SSE connection (attempt ${sseConnectionRetries})`);
+                        if (sseStatusElement) {
+                            sseStatusElement.innerHTML = '🟠 Reconnecting...';
+                            sseStatusElement.style.color = '#FF9800';
+                        }
+                        createSSEConnection(url);
+                    }, delay);
+                } else {
+                    status.innerHTML = 'Connection limit reached. Wait 30s before tracking more nations.';
+                    if (sseStatusElement) {
+                        sseStatusElement.innerHTML = '⏸️ Rate limited';
+                        sseStatusElement.style.color = '#9E9E9E';
+                    }
+                    // Reset after 30 seconds
+                    setTimeout(() => {
+                        sseConnectionRetries = 0;
+                        createSSEConnection(url);
+                    }, 30000);
+                }
+            }
+        };
+        
+        console.log(`New SSE url: ${url}`);
+    }
+
+    // Set up initial event source
     if (typeof EventSource !== 'undefined') {
         const myNation = await getStorageValue('currentwa');
         let url = `/api/nation:${myNation}+`;
@@ -265,24 +411,21 @@
             // lol
             url += `nation:haku`;
         }
-        eventSource = new EventSource(url);
-        eventSource.onmessage = handleEventMessage;
-        console.log(`New SSE url: ${url}`);
+        createSSEConnection(url);
     } else {
         console.error('EventSource is not supported in this browser');
-    }
-
-    eventSource.onopen = () => {
-        console.log('SSE connection opened');
-    }
-
-    eventSource.onerror = () => {
-        console.error('SSE connection error');
     }
 
     document.open();
     document.write(pageContent);
     document.close();
+
+    chrome.storage.local.get('background', async (result) => {
+        if(result.background !== undefined) {
+            var body = (document.querySelector('body') as HTMLBodyElement);
+            body.style.backgroundImage = `url("${result.background}")`;
+        }
+    });
 
     await dieIfNoUserAgent();
 
@@ -316,6 +459,7 @@
     let nationsTracked: string[] = await getStorageValue('trackednations') || [];
     let nationsEndorsed: string[] = [];
     let moveCounts: object = {};
+    let lastMoveSoundTime: number = 0;
 
     /*
      * Helpers
@@ -342,6 +486,43 @@
         await setStorageValue('currentwa', nationNameRegex.exec(response)[1]);
     }
 
+    async function playMoveSuccessSound(): Promise<void>
+    {
+        try {
+            // Debounce logic: only play if enough time has passed since last play
+            const currentTime = Date.now();
+            const debounceDelay = 2000; // 2 seconds
+            
+            if (currentTime - lastMoveSoundTime < debounceDelay) {
+                return; // Skip playing sound if within debounce window
+            }
+            
+            const soundEnabled = await getStorageValue('moveSoundEnabled');
+            if (soundEnabled !== false) { // Default to true if not set
+                const volumePercentage = await getStorageValue('moveSoundVolume') || 50;
+                
+                // Check for custom sound first
+                const customSound = await getStorageValue('customMoveSound');
+                let audioSrc: string;
+                
+                if (customSound) {
+                    audioSrc = customSound; // Use custom sound data URL
+                } else {
+                    audioSrc = chrome.runtime.getURL('audio/move-success.wav'); // Use default sound
+                }
+                
+                const audio = new Audio(audioSrc);
+                audio.volume = volumePercentage / 100; // Convert percentage to 0-1 range
+                await audio.play();
+                
+                // Update the last play time after successfully playing
+                lastMoveSoundTime = currentTime;
+            }
+        } catch (error) {
+            console.log('Failed to play move success sound:', error);
+        }
+    }
+
     /*
      * Event Handlers
      */
@@ -362,6 +543,8 @@
                 await setStorageValue('currentwa', '');
                 nationsTracked = [];
                 await setStorageValue('trackednations', []);
+                // Remove green highlight when resigning
+                currentWANation.classList.remove('highlight-active', 'highlight-update');
             }
         });
     }
@@ -513,6 +696,7 @@
         const raiderHappenings = document.querySelector('#raider-happenings');
         raiderHappenings.innerHTML = '';
         nationsToDossier.innerHTML = '';
+        potentialNationsToTrack.clear();
         chrome.storage.local.get(['raiderjp', 'dossierhappeningscount', 'dossierkeywords'], async (result) =>
         {
             let dossierKeywords: string[] = [];
@@ -574,6 +758,46 @@
                         potentialNationsToTrack.add(nationName);
                     }
                 }
+            }
+            
+            // Add "Track All" button if there are multiple nations to track
+            if (potentialNationsToTrack.size > 3) {
+                const trackAllLi = document.createElement('li');
+                trackAllLi.style.borderTop = '1px solid #333';
+                trackAllLi.style.paddingTop = '5px';
+                trackAllLi.style.marginTop = '5px';
+                
+                let trackAllButton = document.createElement('input');
+                trackAllButton.setAttribute('type', 'button');
+                trackAllButton.setAttribute('class', 'ajaxbutton');
+                trackAllButton.setAttribute('value', `Track All ${potentialNationsToTrack.size} Nations`);
+                trackAllButton.style.fontWeight = 'bold';
+                
+                trackAllButton.addEventListener('click', async () => {
+                    // Filter out nations that are already tracked
+                    const nationsToAdd = Array.from(potentialNationsToTrack)
+                        .filter(nation => !nationsTracked.includes(nation));
+                    
+                    if (nationsToAdd.length > 0) {
+                        // Add all nations at once
+                        nationsTracked.push(...nationsToAdd);
+                        await setStorageValue('trackednations', nationsTracked);
+                        
+                        // Clear the list
+                        nationsToDossier.innerHTML = '';
+                        potentialNationsToTrack.clear();
+                        
+                        // Show feedback
+                        status.innerHTML = `Tracking ${nationsToAdd.length} nations. Live updates will start in ${SSE_DEBOUNCE_DELAY/1000} seconds.`;
+                        notyf.success(`Added ${nationsToAdd.length} nations to tracking`);
+                    } else {
+                        status.innerHTML = 'All nations already being tracked.';
+                    }
+                });
+                
+                trackAllLi.appendChild(trackAllButton);
+                // Add at the beginning of the list
+                nationsToDossier.insertBefore(trackAllLi, nationsToDossier.firstChild);
             }
         });
     }
@@ -654,10 +878,111 @@
         return movedToRegion;
     }
 
+    async function updateOccupationSequence(newSequence: string): Promise<void>
+    {
+        await setStorageValue('occupationsequence', newSequence);
+        document.querySelector('#occupation-sequence').innerHTML = newSequence;
+    }
+
+    async function performOccupationSequence(): Promise<void>
+    {
+        const occupationSequence = await getStorageValue('occupationsequence') || 'ready';
+        
+        switch (occupationSequence) {
+            case 'ready':
+                // Start with chasing
+                await performChaseAction();
+                break;
+            case 'awaiting-localid':
+                // User pressed key again, update localid
+                await performLocalIdUpdate();
+                break;
+            case 'awaiting-region':
+                // User pressed key again, update region status
+                await performRegionUpdate();
+                break;
+            case 'awaiting-endorsement':
+                // User pressed key again, endorse delegate
+                await performEndorsement();
+                break;
+        }
+    }
+
+    async function performChaseAction(): Promise<void>
+    {
+        const doNotMove: string[] = await getStorageValue('blockedregions') || [];
+        const moveRegion = getMovedToRegion();
+        
+        if (moveRegion) {
+            if (doNotMove.indexOf(canonicalize(moveRegion)) !== -1) {
+                status.innerHTML = `Blocked region: ${moveRegion}. Sequence stopped.`;
+                await updateOccupationSequence('ready');
+                return;
+            }
+            
+            chrome.storage.local.get('localid', async (result) =>
+            {
+                const localId = result.localid;
+                const formData = new FormData();
+                formData.set('localid', localId);
+                formData.set('region_name', moveRegion);
+                formData.set('move_region', '1');
+                let response = await makeAjaxQuery('/page=change_region', 'POST', formData);
+                if (response.indexOf('This request failed a security check.') !== -1) {
+                    status.innerHTML = `Failed to move to ${moveRegion}. Sequence stopped.`;
+                    await updateOccupationSequence('ready');
+                }
+                else {
+                    status.innerHTML = `Moved to ${moveRegion}. Press move key to update localid.`;
+                    currentRegion.innerHTML = moveRegion;
+                    document.querySelector('#wa-delegate').innerHTML = 'N/A';
+                    document.querySelector('#last-wa-update').innerHTML = 'N/A';
+                    // Wait for next keypress
+                    await updateOccupationSequence('awaiting-localid');
+                }
+            });
+        } else {
+            status.innerHTML = 'No movement detected. Sequence stopped.';
+            await updateOccupationSequence('ready');
+        }
+    }
+
+    async function performLocalIdUpdate(): Promise<void>
+    {
+        let response = await makeAjaxQuery('/region=rwby', 'GET');
+        getLocalId(response);
+        status.innerHTML = 'Updated localid. Press move key to update region status.';
+        // Wait for next keypress
+        await updateOccupationSequence('awaiting-region');
+    }
+
+    async function performRegionUpdate(): Promise<void>
+    {
+        await updateRegionStatus({ target: null } as MouseEvent);
+        status.innerHTML = 'Updated region status. Press move key to endorse delegate.';
+        // Wait for next keypress
+        await updateOccupationSequence('awaiting-endorsement');
+    }
+
+    async function performEndorsement(): Promise<void>
+    {
+        await endorseDelegate({ target: null } as MouseEvent);
+        status.innerHTML = 'Occupation sequence completed.';
+        // Reset sequence to ready
+        await updateOccupationSequence('ready');
+    }
+
     async function chasingButton(e: MouseEvent): Promise<void>
     {
-        // updated for SSE
-        // jump points and such
+        const occupationMode = await getStorageValue('occupationmode') || false;
+        
+        if (occupationMode) {
+            // In occupation mode, use the sequence logic
+            await performOccupationSequence();
+            return;
+        }
+        
+        // Original chasing logic for non-occupation mode
         const doNotMove: string[] = await new Promise((resolve, reject) =>
         {
             chrome.storage.local.get('blockedregions', (result) =>
@@ -668,7 +993,7 @@
                     resolve([]);
             });
         });
-        // relocations look like this: <li><a href="/nation=oathaastealre">oathaastealre</a> moved from <a href="/region=look_away">look_away</a> to <a href="/region=kaisereich">kaisereich</a></li>
+        
         const moveRegion = getMovedToRegion();
         if ((e.target as HTMLInputElement).value == 'Update Localid') {
             await manualLocalIdUpdate(e);
@@ -678,7 +1003,6 @@
             chrome.storage.local.get('localid', async (result) =>
             {
                 const localId = result.localid;
-                // const moveRegion = (e.target as HTMLInputElement).getAttribute('data-moveregion');
                 const formData = new FormData();
                 formData.set('localid', localId);
                 formData.set('region_name', moveRegion);
@@ -799,39 +1123,57 @@
     {
         if (currentRegion.innerHTML == 'N/A')
             return;
-        const nationRegex: RegExp = new RegExp('nation=([A-Za-z0-9_-]+)');
-        let response = await makeAjaxQuery(`/template-overall=none/region=${currentRegion.innerHTML}`, 'GET');
-        const responseDocument = document.createRange().createContextualFragment(response);
-        // update the region happenings at the same time to not make an extra query
+        
+        // Use the API to fetch region data
+        const regionName = currentRegion.innerHTML;
+        const response = await fetchWithRateLimit(`/cgi-bin/api.cgi?region=${regionName}&q=happenings+delegate+lastupdate`, {}, e?.target as HTMLInputElement);
+        const responseText = await response.text();
+        
+        // Parse the XML response
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(responseText, "application/xml");
+        
+        // Get delegate information
+        const delegateElement = xmlDoc.querySelector('DELEGATE');
+        const lastUpdateElement = xmlDoc.querySelector('LASTUPDATE');
+        
+        if (delegateElement && delegateElement.textContent) {
+            const delegateName = delegateElement.textContent;
+            // Format delegate display similar to the original HTML version
+            document.querySelector('#wa-delegate').innerHTML = `<span class="nname">${delegateName}</span>`;
+            (document.querySelector('#delegate-nation') as HTMLInputElement).value = delegateName;
+        } else {
+            document.querySelector('#wa-delegate').innerHTML = 'None.';
+            (document.querySelector('#delegate-nation') as HTMLInputElement).value = 'N/A';
+        }
+        
+        // Update last WA update time
+        if (lastUpdateElement && lastUpdateElement.textContent) {
+            const lastUpdateTimestamp = Number(lastUpdateElement.textContent);
+            const lastUpdateTime = timeAgo(lastUpdateTimestamp);
+            document.querySelector('#last-wa-update').innerHTML = lastUpdateTime;
+        } else {
+            document.querySelector('#last-wa-update').innerHTML = 'N/A';
+        }
+        
+        // Update region happenings
         chrome.storage.local.get('regionhappeningscount', (result) =>
         {
             let regionHappeningsCount: number = Number(result.regionhappeningscount) || 10;
-            let regionHappeningsLis = responseDocument.querySelectorAll('ul > li');
             regionHappenings.innerHTML = '';
-            for (let i = 0; i != regionHappeningsCount; i++) {
-                let anodes = regionHappeningsLis[i].querySelectorAll('a');
-                let images = regionHappeningsLis[i].querySelectorAll('img');
-                // fix link
-                for (let j = 0; j != anodes.length; j++)
-                    anodes[j].href = anodes[j].href.replace('page=blank/', '');
-                // make images smaller
-                for (let j = 0; j != images.length; j++) {
-                    images[j].width = 12;
-                    images[j].height = 12;
-                }
-                regionHappenings.innerHTML += `<li>${regionHappeningsLis[i].innerHTML}</li>`;
+            
+            // Parse happenings from the API response
+            const happeningsData = parseApiHappenings(responseText);
+            const happeningsText = happeningsData.text;
+            const happeningsTimestamps = happeningsData.timestamps;
+            
+            // Display happenings up to the configured count
+            for (let i = 0; i < Math.min(regionHappeningsCount, happeningsText.length); i++) {
+                const formattedText = formatApiString(happeningsText[i]);
+                const timeString = timeAgo(happeningsTimestamps[i]);
+                regionHappenings.innerHTML += `<li>${timeString}: ${formattedText}</li>`;
             }
         });
-        const updatedWaDelegate = responseDocument.querySelector('#regioncontent > p:nth-child(2) > a > span');
-
-        if (updatedWaDelegate) {
-            document.querySelector('#wa-delegate').innerHTML = updatedWaDelegate.innerHTML;
-            (document.querySelector('#delegate-nation') as HTMLInputElement).value = updatedWaDelegate.querySelector('.nname').innerHTML;
-        } else {
-            document.querySelector('#wa-delegate').innerHTML = 'None.';
-        }
-        const lastWaUpdate = responseDocument.querySelector('#regioncontent > p:nth-child(4) > time').innerHTML;
-        document.querySelector('#last-wa-update').innerHTML = lastWaUpdate;
     }
 
     async function checkCurrentRegion(e: MouseEvent): Promise<void>
@@ -947,25 +1289,55 @@
                 (document.querySelector('#num-switchers') as HTMLSpanElement).innerHTML = String(newSwitchers.length);
             }
             else if (key === 'currentwa')
-                currentWANation.innerHTML = storageChange.newValue || 'N/A';
+                updateWANationDisplay(currentWANation, storageChange.newValue || 'N/A');
+            else if (key === 'occupationmode') {
+                const occupationStatus = document.querySelector('#occupation-status');
+                occupationStatus.innerHTML = storageChange.newValue ? 'Enabled' : 'Disabled';
+            }
+            else if (key === 'occupationsequence') {
+                const occupationSequence = document.querySelector('#occupation-sequence');
+                occupationSequence.innerHTML = storageChange.newValue;
+            }
             else if (key === 'trackednations') {
-                const myNation = document.querySelector('#current-wa-nation').innerHTML;
-                eventSource.close();
-                let url = `/api/nation:${myNation}+`;
-                // nation:{nation} for each nation
-                const newTrackedNations: string[] = storageChange.newValue;
-                if (newTrackedNations.length > 0) {
-                    url += newTrackedNations.map((nation) => `nation:${nation}`).join('+');
-                    eventSource = new EventSource(url);
-                    eventSource.onmessage = handleEventMessage;
-                    console.log(`New SSE url: ${url}`);
-                } else {
-                    // lol
-                    url += `nation:haku`;
-                    eventSource = new EventSource(url);
-                    eventSource.onmessage = handleEventMessage;
-                    console.log(`New SSE url: ${url}`);
+                // Clear any existing reconnect timeout
+                if (sseReconnectTimeout) {
+                    clearTimeout(sseReconnectTimeout);
                 }
+                
+                const newTrackedNations: string[] = storageChange.newValue || [];
+                const addedCount = newTrackedNations.length - (nationsTracked?.length || 0);
+                
+                // Update local tracking immediately for UI responsiveness
+                nationsTracked = newTrackedNations;
+                
+                // Show immediate feedback that nations are being tracked
+                if (addedCount > 0) {
+                    // Don't override important status messages
+                    const currentStatus = status.innerHTML;
+                    if (!currentStatus.includes('Failed') && !currentStatus.includes('Error')) {
+                        if (addedCount === 1) {
+                            // Keep the specific nation tracking message from the button click
+                        } else {
+                            status.innerHTML = `Tracking ${addedCount} new nations. Updates starting soon...`;
+                        }
+                    }
+                }
+                
+                // Debounce SSE reconnection to prevent 429 errors
+                sseReconnectTimeout = setTimeout(() => {
+                    const myNation = document.querySelector('#current-wa-nation').innerHTML;
+                    let url = `/api/nation:${myNation}+`;
+                    
+                    if (newTrackedNations.length > 0) {
+                        url += newTrackedNations.map((nation) => `nation:${nation}`).join('+');
+                    } else {
+                        url += `nation:haku`;
+                    }
+                    
+                    // Use the connection function with retry logic
+                    createSSEConnection(url);
+                    sseReconnectTimeout = null;
+                }, SSE_DEBOUNCE_DELAY); // Wait 2 seconds before reconnecting
             }
         }
     }
@@ -1006,7 +1378,7 @@
      * Initialization
      */
 
-    chrome.storage.local.get(['switchers', 'currentwa'], (result) =>
+    chrome.storage.local.get(['switchers', 'currentwa', 'occupationmode', 'occupationsequence'], (result) =>
     {
         try {
             document.querySelector('#num-switchers').innerHTML = result.switchers.length as string;
@@ -1015,6 +1387,18 @@
             if (e instanceof TypeError) {}
         }
 
-        currentWANation.innerHTML = result.currentwa || 'N/A';
+        updateWANationDisplay(currentWANation, result.currentwa || 'N/A');
+        
+        const occupationStatus = document.querySelector('#occupation-status');
+        const occupationSequence = document.querySelector('#occupation-sequence');
+        occupationStatus.innerHTML = result.occupationmode ? 'Enabled' : 'Disabled';
+        occupationSequence.innerHTML = result.occupationsequence || 'Ready';
+
+        if (!(result.occupationmode)) {
+            document.querySelectorAll('.occupation-mode-toggle').forEach((element) =>
+            {
+                element.classList.add('hidden');
+            });
+        }
     });
 })();

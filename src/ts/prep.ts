@@ -7,7 +7,7 @@
     <title>Reliant - Prep</title>
     <meta charset="utf-8">
 </head>
-<body>
+<body style="background-repeat: no-repeat; background-size: cover;">
 <div id="container">
     <div id="group-1">
         <div id="switchers-prepped-container">
@@ -38,6 +38,13 @@
     document.open();
     document.write(pageContent);
     document.close();
+
+    chrome.storage.local.get('background', async (result) => {
+        if(result.background !== undefined) {
+            var body = (document.querySelector('body') as HTMLBodyElement);
+            body.style.backgroundImage = `url("${result.background}")`;
+        }
+    });
 
     await dieIfNoUserAgent();
 
@@ -94,12 +101,13 @@
                     formData.set('localid', localId);
                     formData.set('region_name', moveRegion);
                     formData.set('move_region', '1');
+                    formData.set('confirm_move', '1');
                     let response = await makeAjaxQuery('/page=change_region', 'POST', formData);
                     if (response.indexOf('This request failed a security check.') !== -1)
                         document.querySelector('#status').innerHTML = `Failed to move to ${moveRegion}.`;
                     else {
                         document.querySelector('#status').innerHTML = `Moved to ${moveRegion}`;
-                        prepButton.value = 'Clear Dossier';
+                        prepButton.value = 'Login to Next Switcher';
                     }
                 });
             }
@@ -109,13 +117,6 @@
                     document.querySelector('#status').innerHTML = `Applied on ${document.querySelector('#current-switcher').innerHTML}`;
                 }
                 prepButton.value = 'Update Localid';
-            }
-            else if ((e.target as HTMLInputElement).value === 'Clear Dossier') {
-                formData.set('chk', result.chk);
-                formData.set('clear_dossier', '1');
-                let response = await makeAjaxQuery('/page=dossier', 'POST', formData);
-                document.querySelector('#status').innerHTML = 'Cleared dossier.';
-                prepButton.value = 'Login to Next Switcher';
             }
             else if ((e.target as HTMLInputElement).value === 'Login to Next Switcher') {
                 chrome.storage.local.get('password', async (result) =>

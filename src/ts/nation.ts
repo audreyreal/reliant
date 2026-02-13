@@ -21,6 +21,7 @@
     {
         const nationName: string = urlParameters['nation'];
         let endorsingNations: string[] = await getNationEndorsements(nationName);
+        endorsingNations.reverse();
         const sidePanel: HTMLDivElement = document.querySelector('#panel');
         const endorsementList: HTMLUListElement = document.createElement('ul');
         for (let i = 0; i !== endorsingNations.length; i++) {
@@ -77,13 +78,21 @@
     // Add the button to the page
     async function buttonListener(e: MouseEvent): Promise<void>
     {
+        // Fetch fresh tracked nations to avoid race conditions with multiple tabs
+        const currentTrackedNations: string[] = await getStorageValue('trackednations') || [];
+        
         if ((e.target as HTMLInputElement).value === 'Track') {
-            trackedNations.push(nationName);
-            await setStorageValue('trackednations', trackedNations);
+            if (!currentTrackedNations.includes(nationName)) {
+                currentTrackedNations.push(nationName);
+                await setStorageValue('trackednations', currentTrackedNations);
+            }
             (e.target as HTMLInputElement).value = 'Stop Tracking';
         } else {
-            trackedNations.splice(trackedNations.indexOf(nationName), 1);
-            await setStorageValue('trackednations', trackedNations);
+            const index = currentTrackedNations.indexOf(nationName);
+            if (index !== -1) {
+                currentTrackedNations.splice(index, 1);
+                await setStorageValue('trackednations', currentTrackedNations);
+            }
             (e.target as HTMLInputElement).value = 'Track';
         }
     }

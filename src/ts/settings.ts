@@ -74,6 +74,15 @@ a dossier button on the main page. Useful for chasing specific teams. <b>Leave b
 <input type="button" id="set-endorse-keywords" value="Set">
 </fieldset>
 <fieldset>
+<legend>Background Image</legend>
+<input type="file" id="new-background-image">
+<br/>
+<img id="uploaded-background-image" style="max-width:60%;"></img>
+<br/>
+<input class="button" type="button" id="set-background-image" value="Set">
+<input class="button" type="button" id="unset-background-image" value="Remove Background Image">
+</fieldset>
+<fieldset>
 <legend>Prepping</legend>
 <p><strong>Password</strong></p>
 <input type="password" id="my-password">
@@ -107,6 +116,34 @@ a dossier button on the main page. Useful for chasing specific teams. <b>Leave b
 </p>
 <p><input type="number" id="max-happenings-count" min="1" max="20"></p>
 <p><input class="button" type="button" id="set-max-happenings" value="Set"></p>
+</fieldset>
+<fieldset>
+<legend>Occupation Chasing Mode</legend>
+<p>When enabled, the move key will step through a sequence: Chase → Update Localid → Update Region Status → Endorse Delegate. Each step requires a separate keypress.</p>
+<input type="checkbox" id="occupation-mode-toggle">
+<label for="occupation-mode-toggle">Enable Occupation Chasing Mode</label>
+<p>Current: <b id="current-occupation-mode">Disabled</b></p>
+</fieldset>
+<fieldset>
+<legend>Move Success Sound</legend>
+<p>When enabled, a notification sound will play when you successfully move to a different region.</p>
+<input type="checkbox" id="move-sound-toggle" checked>
+<label for="move-sound-toggle">Play sound on successful region move</label>
+<p>Current: <b id="current-move-sound-status">Enabled</b></p>
+<p>Volume: <input type="range" id="move-sound-volume" min="0" max="100" value="50">
+<span id="current-move-sound-volume">50</span>%</p>
+</fieldset>
+<fieldset>
+<legend>Custom Move Success Sound</legend>
+<p>Upload your own sound file to play when you successfully move to a different region.</p>
+<input type="file" id="new-custom-sound" accept="audio/*">
+<br/>
+<audio id="uploaded-custom-sound" controls style="max-width:60%; margin: 10px 0;"></audio>
+<br/>
+<input class="button" type="button" id="test-custom-sound" value="Test Sound">
+<input class="button" type="button" id="set-custom-sound" value="Set Custom Sound">
+<input class="button" type="button" id="unset-custom-sound" value="Remove Custom Sound">
+<p>Current: <b id="current-custom-sound-status">Default</b></p>
 </fieldset>
 <fieldset id="keys">
 <legend>Change Keys</legend>
@@ -205,6 +242,10 @@ Current:
 <input class="button" type="button" id="set-key" value="Set">
 </fieldset>
 </form>
+<p><strong>Login Landing Page</strong></p>
+<input type="text" id="login-landing-page">
+<input class="button" type="button" id="set-login-landing-page" value="Set">
+<p>Current: <b id="current-login-landing-page"></b></p>
 <h2>Current Prep Switcher Set</h2>
 <p id="current-switcher-set"></p>
 <h2>Currently Stored Applications</h2>
@@ -229,12 +270,23 @@ document.querySelector('#set-jump-point').addEventListener('click', setJumpPoint
 document.querySelector('#set-ro-name').addEventListener('click', setRoName);
 document.querySelector('#set-max-happenings').addEventListener('click', setMaxHappeningsCount);
 document.querySelector('#set-switchers').addEventListener('click', setSwitchers);
+document.querySelector('#set-login-landing-page').addEventListener('click', setLoginLandingPage);
 document.querySelector('#set-password').addEventListener('click', setPassword);
 document.querySelector('#clear-wa-apps').addEventListener('click', clearStoredWaApplications);
 document.querySelector('#set-blocked-regions').addEventListener('click', setBlockedRegions);
 document.querySelector('#set-dossier-keywords').addEventListener('click', setDossierKeywords);
 document.querySelector('#set-endorse-keywords').addEventListener('click', setEndorseKeywords);
 document.querySelector('#find-wa').addEventListener('click', findMyWa);
+document.querySelector('#set-background-image').addEventListener('click', setBackgroundImage);
+document.querySelector('#unset-background-image').addEventListener('click', unsetBackgroundImage);
+document.querySelector('#new-background-image').addEventListener('change', loadBackgroundImage);
+document.querySelector('#occupation-mode-toggle').addEventListener('change', toggleOccupationMode);
+document.querySelector('#move-sound-toggle').addEventListener('change', toggleMoveSound);
+document.querySelector('#move-sound-volume').addEventListener('input', setMoveSoundVolume);
+document.querySelector('#new-custom-sound').addEventListener('change', loadCustomSound);
+document.querySelector('#test-custom-sound').addEventListener('click', testCustomSound);
+document.querySelector('#set-custom-sound').addEventListener('click', setCustomSound);
+document.querySelector('#unset-custom-sound').addEventListener('click', unsetCustomSound);
 
 /*
  * Handlers
@@ -308,6 +360,121 @@ function setPassword(e: MouseEvent): void
     notyf.success(`Set password to ${password}`);
 }
 
+function normalizeLandingPage(value: string | null | undefined): string
+{
+    if (!value) return '';
+    return value.trim().replace(/^\//, '').split('?')[0].trim();
+}
+
+function setLoginLandingPage(e: MouseEvent): void
+{
+    const rawLandingPage = (document.querySelector('#login-landing-page') as HTMLInputElement).value;
+    const landingPage = normalizeLandingPage(rawLandingPage);
+
+    if (!landingPage) {
+        chrome.storage.local.remove('loginlandingpage');
+        notyf.success('Cleared login landing page. Using default page=un.');
+        return;
+    }
+
+    chrome.storage.local.set({'loginlandingpage': landingPage});
+    notyf.success(`Set login landing page to ${landingPage}`);
+}
+
+function loadBackgroundImage(e: Event): void
+{
+    var files = (e.target as HTMLInputElement).files;
+    
+    if (files && files.length) {
+        var reader = new FileReader();
+        reader.onload = function () {
+            (document.querySelector("#uploaded-background-image") as HTMLImageElement).src = 
+                reader.result as string;
+        }
+        reader.readAsDataURL(files[0]);
+    }
+}
+
+function setBackgroundImage(e: MouseEvent): void
+{
+    const image = (document.querySelector('#uploaded-background-image') as HTMLImageElement);
+
+    if(!image.complete || image.naturalWidth === 0)
+        throw new Error("Image isn't loaded yet");
+    
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error("Failed to get canvas context");
+
+    ctx.drawImage(image, 0, 0);
+
+    chrome.storage.local.set({'background': canvas.toDataURL('image/png')});
+    notyf.success(`Set new background image`);
+}
+
+function unsetBackgroundImage(e: MouseEvent): void
+{
+    chrome.storage.local.remove('background');
+    notyf.success('Cleared background image.');
+}
+
+function loadCustomSound(e: Event): void
+{
+    var files = (e.target as HTMLInputElement).files;
+    
+    if (files && files.length) {
+        var reader = new FileReader();
+        reader.onload = function () {
+            (document.querySelector("#uploaded-custom-sound") as HTMLAudioElement).src = 
+                reader.result as string;
+        }
+        reader.readAsDataURL(files[0]);
+    }
+}
+
+function setCustomSound(e: MouseEvent): void
+{
+    const audio = (document.querySelector('#uploaded-custom-sound') as HTMLAudioElement);
+
+    if(!audio.src)
+        throw new Error("No audio file loaded");
+    
+    chrome.storage.local.set({'customMoveSound': audio.src});
+    document.querySelector('#current-custom-sound-status').innerHTML = 'Custom';
+    notyf.success(`Set custom move success sound`);
+}
+
+function unsetCustomSound(e: MouseEvent): void
+{
+    chrome.storage.local.remove('customMoveSound');
+    document.querySelector('#current-custom-sound-status').innerHTML = 'Default';
+    (document.querySelector('#uploaded-custom-sound') as HTMLAudioElement).src = '';
+    notyf.success('Removed custom sound. Using default sound.');
+}
+
+async function testCustomSound(e: MouseEvent): Promise<void>
+{
+    const audio = (document.querySelector('#uploaded-custom-sound') as HTMLAudioElement);
+    
+    if(!audio.src) {
+        notyf.error('No audio file loaded to test');
+        return;
+    }
+    
+    try {
+        const volumePercentage = parseInt((document.querySelector('#move-sound-volume') as HTMLInputElement).value);
+        audio.volume = volumePercentage / 100;
+        await audio.play();
+        notyf.success('Playing test sound');
+    } catch (error) {
+        console.log('Failed to play test sound:', error);
+        notyf.error('Failed to play test sound');
+    }
+}
+
 function clearStoredWaApplications(e: MouseEvent): void
 {
     chrome.storage.local.set({'switchers': []});
@@ -369,10 +536,69 @@ async function findMyWa(e: MouseEvent): Promise<void>
     xhr.send();
 }
 
-chrome.storage.local.get(['prepswitchers', 'password'], (result) =>
+async function toggleOccupationMode(e: Event): Promise<void>
+{
+    const isEnabled = (e.target as HTMLInputElement).checked;
+    await setStorageValue('occupationmode', isEnabled);
+    await setStorageValue('occupationsequence', 'ready');
+    document.querySelector('#current-occupation-mode').innerHTML = isEnabled ? 'Enabled' : 'Disabled';
+    notyf.success(`Occupation mode ${isEnabled ? 'enabled' : 'disabled'}`);
+}
+
+async function toggleMoveSound(e: Event): Promise<void>
+{
+    const isEnabled = (e.target as HTMLInputElement).checked;
+    await setStorageValue('moveSoundEnabled', isEnabled);
+    document.querySelector('#current-move-sound-status').innerHTML = isEnabled ? 'Enabled' : 'Disabled';
+    notyf.success(`Move sound ${isEnabled ? 'enabled' : 'disabled'}`);
+}
+
+async function setMoveSoundVolume(e: Event): Promise<void>
+{
+    const volume = parseInt((e.target as HTMLInputElement).value);
+    await setStorageValue('moveSoundVolume', volume);
+    document.querySelector('#current-move-sound-volume').innerHTML = volume.toString();
+    // notyf.success(`Move sound volume set to ${volume}%`);
+}
+
+chrome.storage.local.get(['prepswitchers', 'password', 'useragent', 'loginlandingpage'], (result) =>
 {
     const currentSwitcherSet = document.querySelector('#current-switcher-set');
     const prepSwitchers = result.prepswitchers ?? [];
+    const userAgent = result.useragent ?? '';
+    const password = result.password || '';
+    const landingPage = normalizeLandingPage(result.loginlandingpage) || 'page=un';
+
+    function submitSwitcherLogin(switcherName: string): void
+    {
+        const form = document.createElement('form');
+        form.action = `/${landingPage}?script=reliant_${RELIANT_VERSION}_by_Haku_in_use_by_${userAgent}&userclick=${Date.now()}`;
+        form.method = 'post';
+        form.target = '_blank';
+        form.style.display = 'none';
+
+        const loggingInput = document.createElement('input');
+        loggingInput.type = 'hidden';
+        loggingInput.name = 'logging_in';
+        loggingInput.value = '1';
+
+        const nationInput = document.createElement('input');
+        nationInput.type = 'hidden';
+        nationInput.name = 'nation';
+        nationInput.value = switcherName;
+
+        const passwordInput = document.createElement('input');
+        passwordInput.type = 'hidden';
+        passwordInput.name = 'password';
+        passwordInput.value = password;
+
+        form.appendChild(loggingInput);
+        form.appendChild(nationInput);
+        form.appendChild(passwordInput);
+        document.body.appendChild(form);
+        form.submit();
+        form.remove();
+    }
 
     // Create a document fragment
     const fragment = document.createDocumentFragment();
@@ -382,9 +608,13 @@ chrome.storage.local.get(['prepswitchers', 'password'], (result) =>
 
         // Create anchor element
         const anchor = document.createElement('a');
-        anchor.href = `/page=un?nation=${switcherName}&password=${password}&logging_in=1`;
+        anchor.href = `/${landingPage}?nation=${switcherName}&logging_in=1`;
         anchor.target = '_blank';
         anchor.textContent = switcherName;
+        anchor.addEventListener('click', (event) => {
+            event.preventDefault();
+            submitSwitcherLogin(switcherName);
+        });
 
         // Append anchor to the fragment
         fragment.appendChild(anchor);
@@ -485,7 +715,12 @@ chrome.storage.local.get('switchers', (result) => {
             getCurrentKey('roname'),
             getCurrentKey('blockedregions'),
             getCurrentKey('dossierkeywords'),
-            getCurrentKey('endorsekeywords')
+            getCurrentKey('endorsekeywords'),
+            getCurrentKey('occupationmode'),
+            getCurrentKey('moveSoundEnabled'),
+            getCurrentKey('moveSoundVolume'),
+            getCurrentKey('customMoveSound'),
+            getCurrentKey('loginlandingpage')
         ]);
 
         (document.querySelector('#new-main-nation') as HTMLInputElement).value = currentSettings[0];
@@ -494,12 +729,33 @@ chrome.storage.local.get('switchers', (result) => {
         const blockedRegions = currentSettings[3] ?? [];
         const dossierKeywords = currentSettings[4] ?? [];
         const endorseKeywords = currentSettings[5] ?? [];
+        const occupationMode = currentSettings[6] ?? false;
+        const moveSoundEnabled = currentSettings[7] ?? false;
+        const moveSoundVolume = currentSettings[8] ?? 50;
+        const customMoveSound = currentSettings[9];
+        const loginLandingPage = normalizeLandingPage(currentSettings[10]) || 'page=un';
+        
         for (let i = 0; i !== blockedRegions.length; i++)
             document.querySelector('#current-blocked-regions').innerHTML += `${blockedRegions[i]}<br>`;
         for (let i = 0; i !== dossierKeywords.length; i++)
             document.querySelector('#current-dossier-keywords').innerHTML += `<b>${dossierKeywords[i]}</b><br>`;
         for (let i = 0; i !== endorseKeywords.length; i++)
             (document.querySelector('#endorse-keywords') as HTMLTextAreaElement).value += `${endorseKeywords[i]}\n`;
+        
+        (document.querySelector('#occupation-mode-toggle') as HTMLInputElement).checked = Boolean(occupationMode);
+        document.querySelector('#current-occupation-mode').innerHTML = occupationMode ? 'Enabled' : 'Disabled';
+        
+        (document.querySelector('#move-sound-toggle') as HTMLInputElement).checked = Boolean(moveSoundEnabled);
+        document.querySelector('#current-move-sound-status').innerHTML = moveSoundEnabled ? 'Enabled' : 'Disabled';
+        
+        (document.querySelector('#move-sound-volume') as HTMLInputElement).value = moveSoundVolume.toString();
+        document.querySelector('#current-move-sound-volume').innerHTML = moveSoundVolume.toString();
+        
+        // Set custom sound status
+        document.querySelector('#current-custom-sound-status').innerHTML = customMoveSound ? 'Custom' : 'Default';
+
+        (document.querySelector('#login-landing-page') as HTMLInputElement).value = loginLandingPage;
+        document.querySelector('#current-login-landing-page').innerHTML = loginLandingPage;
     }
 
     await displayCurrentKeys();

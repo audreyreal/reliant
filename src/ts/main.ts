@@ -112,6 +112,9 @@ async function setDefaultStorageValues(): Promise<void>
         { key: 'prepswitchers', value: [] },
         { key: 'switchers', value: [] },
         { key: 'raiderjp', value: 'suspicious'},
+        { key: 'occupationmode', value: false },
+        { key: 'occupationsequence', value: 'ready' },
+        { key: 'moveSoundVolume', value: 50 },
     ];
 
     for (const { key, value } of defaultValues) {
@@ -181,7 +184,7 @@ function getChk(page?: string): void
     if (chk)
         chrome.storage.local.set({'chk': chk.value});
     else if (page) {
-        const chkRegex: RegExp = new RegExp('<input type="hidden" name="chk" value="([A-Za-z0-9]+?)">');
+        const chkRegex: RegExp = new RegExp('<input type="hidden" name="chk" value="([A-Za-z0-9_-]+?)">');
         const match: string[] = chkRegex.exec(page);
         chrome.storage.local.set({'chk': match[1]});
     }
@@ -294,13 +297,21 @@ let keys: object = {};
 chrome.storage.local.get('movekey', (result) =>
 {
     const moveKey = result.movekey || 'X';
-    keys[moveKey] = () =>
+    keys[moveKey] = async () =>
     {
         const moveButton: HTMLButtonElement = document.querySelector('button[name=move_region]');
         if (moveButton)
             moveButton.click();
-        else if (urlParameters['reliant'] === 'main')
-            (document.querySelector('#chasing-button') as HTMLInputElement).click();
+        else if (urlParameters['reliant'] === 'main') {
+            const occupationMode = await getStorageValue('occupationmode') || false;
+            if (occupationMode) {
+                // In occupation mode, trigger sequence through chasing button
+                (document.querySelector('#chasing-button') as HTMLInputElement).click();
+            } else {
+                // Normal mode - just trigger chasing button
+                (document.querySelector('#chasing-button') as HTMLInputElement).click();
+            }
+        }
         else if (urlParameters['region']) {
             const updateLocalIdButton: HTMLInputElement = document.querySelector('.updatelocalid[data-clicked="0"]');
             if (updateLocalIdButton)
